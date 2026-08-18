@@ -6,6 +6,7 @@ import time
 
 import requests
 from bs4 import BeautifulSoup
+from pydantic import BaseModel, ValidationError
 
 
 START_URL = "https://books.toscrape.com/catalogue/page-1.html"
@@ -16,6 +17,17 @@ HEADERS = {
 
 TIMEOUT = 10
 REQUEST_DELAY = 0.5
+
+class BookRecord(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str
+    description: str | None = None
+    source_page: str
+    fetched_at: str
 
 
 def fetch_page(url, cache_file):
@@ -266,27 +278,106 @@ def extract_all_books(books):
     return records
 
 
+def validate_records(raw_records):
+
+    valid_records = []
+    errors = []
+
+    for record in raw_records:
+
+        try:
+            finished_record = {
+                **record,
+                "price_gbp": normalize_price(record.get("price_text"))
+            }
+
+            validated_book = BookRecord(**finished_record)
+
+            valid_records.append(validated_book.model_dump())
+
+        except (ValidationError, ValueError) as error:
+
+            errors.append({
+                "product_url": record.get(
+                    "product_url"
+                ),
+                "error": str(error)
+            })
+
+    return valid_records, errors
+
+
+def normalize_price(price_text):
+
+    if not price_text:
+        raise ValueError("Price is missing")
+
+    cleaned_price = price_text.replace("£", "").strip()
+
+    return float(cleaned_price)
+
+
+def save_output(valid_records, errors):
+
+    output_folder = Path("output")
+
+    output_folder.mkdir(
+        exist_ok=True
+    )
+
+    books_file = output_folder / "books.json"
+    errors_file = output_folder / "errors.json"
+
+    books_file.write_text(
+        json.dumps(
+            valid_records,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+    errors_file.write_text(
+        json.dumps(
+            errors,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
 def main():
 
     books = discover_books()
 
-    records = extract_all_books(books)
+    raw_records = extract_all_books(books)
 
-    if records:
+    valid_records, errors = validate_records(
+        raw_records
+    )
+
+    save_output(
+        valid_records,
+        errors
+    )
+
+    print()
+    print("Validation complete")
+    print(f"valid_records={len(valid_records)}")
+    print(f"invalid_records={len(errors)}")
+
+    if valid_records:
 
         print()
-        print("Sample raw record:")
+        print("Sample validated record:")
 
         print(
             json.dumps(
-                records[0],
+                valid_records[0],
                 indent=2,
                 ensure_ascii=False
             )
         )
-
-    print()
-    print(f"detail_pages={len(records)}")
 
 
 if __name__ == "__main__":

@@ -18,6 +18,18 @@ HEADERS = {
 TIMEOUT = 10
 REQUEST_DELAY = 0.5
 
+RETRY_WAIT = 1
+BROKEN_TEST_URL = (
+    "https://books.toscrape.com/catalogue/"
+    "this-book-does-not-exist/index.html"
+)
+
+run_stats = {
+    "pages_fetched": 0,
+    "cache_hits": 0,
+    "failed_urls": []
+}
+
 class BookRecord(BaseModel):
     title: str
     product_url: str
@@ -30,50 +42,133 @@ class BookRecord(BaseModel):
     fetched_at: str
 
 
+def record_failed_page(url, reason):
+
+    print(f"FAILED - {url} - {reason}")
+
+    run_stats["failed_urls"].append({
+        "url": url,
+        "reason": reason
+    })
+    
 def fetch_page(url, cache_file):
 
     cache_file = Path(cache_file)
 
-    #create cache folders if needed
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    #read from cache if page already exists
+    # use cache first
     if cache_file.exists():
+
         content = cache_file.read_bytes()
+
+        run_stats["cache_hits"] += 1
 
         print(f"CACHE HIT - {url}")
 
         return content
 
-    #wait before a real request
-    time.sleep(REQUEST_DELAY)
+    for attempt in range(2):
 
-    print(f"FETCH - {url}")
+        time.sleep(REQUEST_DELAY)
 
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=TIMEOUT
+        print(
+            f"FETCH attempt {attempt + 1} - {url}"
         )
 
-    except requests.RequestException as error:
-        print(f"Request failed: {error}")
+        try:
+
+            response = requests.get(
+                url,
+                headers=HEADERS,
+                timeout=TIMEOUT
+            )
+
+        # timeout can be retried once
+        except requests.Timeout:
+
+            if attempt == 0:
+
+                print(
+                    f"Timeout. Retrying in "
+                    f"{RETRY_WAIT} second..."
+                )
+
+                time.sleep(RETRY_WAIT)
+
+                continue
+
+            record_failed_page(
+                url,
+                "Request timed out"
+            )
+
+            return None
+
+        #other network problems are skipped
+        except requests.RequestException as error:
+
+            record_failed_page(
+                url,
+                str(error)
+            )
+
+            return None
+
+        #success
+        if response.status_code == 200:
+
+            content = response.content
+
+            cache_file.write_bytes(content)
+
+            run_stats["pages_fetched"] += 1
+
+            print(
+                f"FETCH complete - "
+                f"{len(content)} bytes"
+            )
+
+            return content
+
+        #never retry 403 or 404
+        if response.status_code in (403, 404):
+
+            record_failed_page(
+                url,
+                f"HTTP {response.status_code}"
+            )
+
+            return None
+
+        #retry a server error once
+        if 500 <= response.status_code <= 599:
+
+            if attempt == 0:
+
+                print(
+                    f"Server error "
+                    f"{response.status_code}. "
+                    f"Retrying in "
+                    f"{RETRY_WAIT} second..."
+                )
+
+                time.sleep(RETRY_WAIT)
+
+                continue
+
+        #any remaining HTTP error
+        record_failed_page(
+            url,
+            f"HTTP {response.status_code}"
+        )
+
         return None
 
-    # only accept successful responses
-    if response.status_code != 200:
-        print(f"Fetch failed with status {response.status_code}")
-        return None
-
-    content = response.content
-
-    # save HTML to cache
-    cache_file.write_bytes(content)
-
-    print(f"FETCH complete - {len(content)} bytes")
-
-    return content
+    return None
 
 
 def get_fetched_at(cache_file):
@@ -346,38 +441,144 @@ def save_output(valid_records, errors):
         encoding="utf-8"
     )
 
+
+def save_run_report(
+    started_at,
+    start_timer,
+    valid_records,
+    errors
+):
+
+    duration = time.perf_counter() - start_timer
+
+    report = {
+        "started_at": started_at,
+        "duration_seconds": round(
+            duration,
+            2
+        ),
+        "pages_fetched": run_stats[
+            "pages_fetched"
+        ],
+        "cache_hits": run_stats[
+            "cache_hits"
+        ],
+        "valid_records": len(
+            valid_records
+        ),
+        "invalid_records": len(
+            errors
+        ),
+        "failed_pages": len(
+            run_stats["failed_urls"]
+        ),
+        "failed_urls": run_stats[
+            "failed_urls"
+        ]
+    }
+
+    output_folder = Path("output")
+
+    output_folder.mkdir(
+        exist_ok=True
+    )
+
+    report_file = (
+        output_folder /
+        "run-report.json"
+    )
+
+    report_file.write_text(
+        json.dumps(
+            report,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+    return report
+
+
 def main():
 
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    start_timer = time.perf_counter()
+
+    #discover the real 60 books
     books = discover_books()
 
-    raw_records = extract_all_books(books)
+    #broken URL for Stage 5 test
+    books_to_process = books.copy()
 
+    books_to_process.append({
+        "product_url": BROKEN_TEST_URL,
+        "source_page": START_URL
+    })
+
+    print()
+    print(
+        "Added one deliberately broken URL "
+        "for the Stage 5 test."
+    )
+
+    #scrape details
+    raw_records = extract_all_books(
+        books_to_process
+    )
+
+    #normalize and validate
     valid_records, errors = validate_records(
         raw_records
     )
 
+    #save books.json and errors.json
     save_output(
         valid_records,
         errors
     )
 
+    #create final report
+    report = save_run_report(
+        started_at,
+        start_timer,
+        valid_records,
+        errors
+    )
+
     print()
-    print("Validation complete")
-    print(f"valid_records={len(valid_records)}")
-    print(f"invalid_records={len(errors)}")
+    print("Run complete")
 
-    if valid_records:
+    print(
+        f"valid_records="
+        f"{len(valid_records)}"
+    )
 
-        print()
-        print("Sample validated record:")
+    print(
+        f"invalid_records="
+        f"{len(errors)}"
+    )
 
-        print(
-            json.dumps(
-                valid_records[0],
-                indent=2,
-                ensure_ascii=False
-            )
-        )
+    print(
+        f"failed_pages="
+        f"{report['failed_pages']}"
+    )
+
+    print(
+        f"pages_fetched="
+        f"{report['pages_fetched']}"
+    )
+
+    print(
+        f"cache_hits="
+        f"{report['cache_hits']}"
+    )
+
+    print(
+        f"duration_seconds="
+        f"{report['duration_seconds']}"
+    )
 
 
 if __name__ == "__main__":

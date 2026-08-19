@@ -18,6 +18,8 @@ HEADERS = {
 TIMEOUT = 10
 REQUEST_DELAY = 0.5
 
+TEST_BROKEN_URL = False
+
 RETRY_WAIT = 1
 BROKEN_TEST_URL = (
     "https://books.toscrape.com/catalogue/"
@@ -512,16 +514,20 @@ def main():
     #broken URL for Stage 5 test
     books_to_process = books.copy()
 
-    books_to_process.append({
-        "product_url": BROKEN_TEST_URL,
-        "source_page": START_URL
-    })
+    if TEST_BROKEN_URL:
+        books_to_process.append({
+            "product_url": BROKEN_TEST_URL,
+            "source_page": START_URL
+        })
 
-    print()
-    print(
-        "Added one deliberately broken URL "
-        "for the Stage 5 test."
-    )
+        print()
+        print("Added one deliberately broken URL for testing.")
+
+        print()
+        print(
+            "Added one deliberately broken URL "
+            "for the Stage 5 test."
+        )
 
     #scrape details
     raw_records = extract_all_books(
